@@ -37,11 +37,11 @@ inline void check_time() {
     }
 }
 
-int quiescence(int alpha, int beta, Board& board) {
+int quiescence(int ply, int alpha, int beta, Board& board) {
     total_nodes++;
 
     // Check time every 2048 nodes
-    if ((total_nodes & 2048) == 0) check_time();
+    if ((total_nodes & 2047) == 0) check_time();
 
     // If time expired, abort search immediately
     if (stopSearch) return 0;
@@ -50,7 +50,7 @@ int quiescence(int alpha, int beta, Board& board) {
     Move tt_move = 0;
     int tt_score = 0;
 
-    if (tt.probe(board.hash, 0, alpha, beta, tt_score, tt_move, board.ply_counter)) return tt_score;
+    if (tt.probe(board.hash, 0, alpha, beta, tt_score, tt_move, ply)) return tt_score;
 
     Square king_pos = static_cast<Square>(std::countr_zero(board.piece_type_bb[board.turn][KING]));
     bool in_check = board.is_square_attacked(king_pos);
@@ -90,7 +90,7 @@ int quiescence(int alpha, int beta, Board& board) {
         board.make_move(move);
         if (!board.is_king_capturable()) {
             legal_moves_count++;
-            int score = -quiescence(-beta, -alpha, board);
+            int score = -quiescence(ply + 1, -beta, -alpha, board);
             board.unmake_move(move);
 
             if (score > best_score) {
@@ -106,20 +106,22 @@ int quiescence(int alpha, int beta, Board& board) {
     }
 
     if (in_check && legal_moves_count == 0) {
-        return -INF + board.ply_counter; // Actual Checkmate
+        return -INF + ply; // Actual Checkmate
     }
 
-    TTFlag flag = (best_score <= original_alpha) ? UPPER : (best_score >= beta ? LOWER : EXACT);
-    tt.store(board.hash, 0, best_score, flag, best_move, board.ply_counter);
+    if (!stopSearch) {
+        TTFlag flag = (best_score <= original_alpha) ? UPPER : (best_score >= beta ? LOWER : EXACT);
+        tt.store(board.hash, 0, best_score, flag, best_move, ply);
+    }
 
     return best_score;
 }
 
-int negamax(int depth, Board& board, int alpha, int beta) {
+int negamax(int depth, int ply, Board& board, int alpha, int beta) {
     total_nodes++;
 
-    // Check time every 10000 nodes
-    if ((total_nodes & 2048) == 0) check_time();
+    // Check time every 2048 nodes
+    if ((total_nodes & 2047) == 0) check_time();
 
     // If time expired, abort search immediately
     if (stopSearch) return 0;
@@ -128,9 +130,9 @@ int negamax(int depth, Board& board, int alpha, int beta) {
     Move tt_move = 0;
     int tt_score = 0;
 
-    if (tt.probe(board.hash, depth, alpha, beta, tt_score, tt_move, board.ply_counter)) return tt_score;
+    if (tt.probe(board.hash, depth, alpha, beta, tt_score, tt_move, ply) && (ply > 0)) return tt_score;
 
-    if (depth == 0) return quiescence(alpha, beta, board);
+    if (depth == 0) return quiescence(ply + 1, alpha, beta, board);
 
     MoveList move_list;
     board.generate_pseudo_legal_moves(move_list);
@@ -154,7 +156,7 @@ int negamax(int depth, Board& board, int alpha, int beta) {
         board.make_move(move);
         if (!board.is_king_capturable()) {
             legal_moves_count++;
-            int score = -negamax(depth - 1, board, -beta, -alpha);
+            int score = -negamax(depth - 1, ply + 1, board, -beta, -alpha);
             if (score > best_score) {
                 best_score = score;
                 best_move = move;
@@ -172,21 +174,23 @@ int negamax(int depth, Board& board, int alpha, int beta) {
     if (legal_moves_count == 0) {
         Square king_pos = static_cast<Square>(std::countr_zero(board.piece_type_bb[board.turn][KING]));
         if (board.is_square_attacked(king_pos)) { // in check
-            return -INF + board.ply_counter; // Checkmate, return negative score with depth to prefer faster checkmates
+            return -INF + ply; // Checkmate, return negative score with depth to prefer faster checkmates
         }
         return 0; // stalemate
     }
 
-    TTFlag flag;
-    if (best_score <= original_alpha) {
-        flag = UPPER; // Fail-low
-    } else if (best_score >= beta) {
-        flag = LOWER; // Fail-high
-    } else {
-        flag = EXACT; // PV Node
-    }
+    if (!stopSearch) {
+        TTFlag flag;
+        if (best_score <= original_alpha) {
+            flag = UPPER; // Fail-low
+        } else if (best_score >= beta) {
+            flag = LOWER; // Fail-high
+        } else {
+            flag = EXACT; // PV Node
+        }
 
-    tt.store(board.hash, depth, best_score, flag, best_move, board.ply_counter);
+        tt.store(board.hash, depth, best_score, flag, best_move, ply);
+    }
 
     return best_score;
 }
@@ -223,7 +227,7 @@ Move ids(Board& board) {
         auto start = std::chrono::steady_clock::now();
         total_nodes = 0;
         
-        int score = negamax(depth, board, alpha, beta);
+        int score = negamax(depth, 0, board, alpha, beta);
 
         if (stopSearch) break; // Time ran out; Discard results
 
@@ -237,7 +241,7 @@ Move ids(Board& board) {
         auto end = std::chrono::steady_clock::now();
         auto seconds = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
         totalTime += seconds;
-        double nps = total_nodes*1000 / seconds;
+        uint64_t nps = total_nodes*1000 / std::max<int64_t>(seconds, 1);
         all_nodes += total_nodes;
 
         // std::println("Score: {}", score);
@@ -247,7 +251,7 @@ Move ids(Board& board) {
         //         << " | Nodes: " << total_nodes 
         //         << " | Time: " << seconds << "s" 
         //         << " | NPS: " << static_cast<uint64_t>(nps) << std::endl;
-        std::println("info depth {} score cp {} nodes {} nps {} time {} pv {}", depth, score, total_nodes, nps, seconds, moveToString(bestmove)); std::fflush(stdout);
+        std::println("info depth {} score cp {} nodes {} nps {} time {} pv {}", depth, score, total_nodes, nps, totalTime, moveToString(bestmove)); std::fflush(stdout);
 
         // Stop early if a forced mate is found
         if (score > 90000 || score < -90000) break;
